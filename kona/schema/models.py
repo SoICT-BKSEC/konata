@@ -259,6 +259,13 @@ class KonaChallengeItem(KonaModel):
         ctfd: list[CTFDFlag] = []
 
     class InstancerConfig(KonaModel):
+        class SSH(KonaModel):
+            model_config = ConfigDict(extra='forbid')
+            username: str = Field(min_length=1, max_length=32, pattern=r'^[a-zA-Z_][a-zA-Z0-9_-]*$')
+            password: str | None = Field(default=None, max_length=512)
+
+        ssh: SSH | None = None
+
         class ExposeKind(StrEnum):
             TCP = 'tcp'
             TCP_SSL = 'tcp-ssl'
@@ -473,8 +480,18 @@ class KonaCTFDCredentials(KonaModel):
     extra_headers: dict[str, str] = {}
 
 
+class KonaBKSECTrainingCredentials(KonaModel):
+    """BKSEC Training admin credentials. `admin_token` is sent verbatim as a bearer token."""
+
+    base_url: AnyHttpUrl
+    admin_token: KonaSecretOrValue
+    extra_headers: dict[str, str] = {}
+
+
 class KonaDiscoveryConfig(KonaModel):
     challenge_folder_depth: int = 3
+    # Folders (relative to the deploy directory) that discovery never enters.
+    exclude: list[str] = Field(default_factory=list)
     attachment_analysis_depth: int = 50
     klodd_domain: str | None = None
     klodd_endpoint_name: str | None = None
@@ -513,8 +530,25 @@ unknown endpoint type {{ endpoint.type }}
 > unknown endpoint type {{ endpoint.type }}
 {%- endif %}
 {% endfor -%}"""
+        bksectraining: str = """{% for endpoint in challenge.endpoints -%}
+{% if endpoint.type == models.KonaEndpointType.SOCAT %}
+{{ endpoint.name_prefix }}`socat -,raw,echo=0 tcp:{{ endpoint.endpoint }}:{{ endpoint.port or 1337 }}`
+{% elif endpoint.type == models.KonaEndpointType.NC %}
+{{ endpoint.name_prefix }}`nc {{ endpoint.endpoint }} {{ endpoint.port or 1337 }}`
+{% elif endpoint.type == models.KonaEndpointType.NCAT_SSL %}
+{{ endpoint.name_prefix }}`ncat --ssl {{ endpoint.endpoint }} {{ endpoint.port or 1337 }}`
+{% elif endpoint.type in (models.KonaEndpointType.HTTP, models.KonaEndpointType.HTTPS) %}
+{% if endpoint.name -%}
+[{{ endpoint.name }}]({{ endpoint.http_endpoint }})
+{% else -%}
+[{{ endpoint.http_endpoint }}]({{ endpoint.http_endpoint }})
+{% endif -%}
+{% else -%}
+unknown endpoint type {{ endpoint.type }}
+{% endif -%}
+{% endfor -%}"""
 
-        @field_validator('ctfd', 'rctf')
+        @field_validator('ctfd', 'rctf', 'bksectraining')
         @classmethod
         def strip_values(cls, v: str) -> str:
             return v.strip()
@@ -524,8 +558,10 @@ unknown endpoint type {{ endpoint.type }}
             '{{ challenge.description }}\n\n{{ endpoints_rendered.strip() }}\n\n**Author**: {{ challenge.author }}'
         )
         rctf: str = '{{ challenge.description }}\n\n{{ endpoints_rendered.strip() }}'
+        # Author is carried as a platform tag, so it is not repeated in the body.
+        bksectraining: str = '{{ challenge.description }}\n\n{{ endpoints_rendered.strip() }}'
 
-        @field_validator('ctfd', 'rctf')
+        @field_validator('ctfd', 'rctf', 'bksectraining')
         @classmethod
         def strip_values(cls, v: str) -> str:
             return v.strip()
@@ -587,6 +623,7 @@ class KonaGlobalConfig(KonaModel):
     secrets: dict[str, KonaSecret] = {}
     rctf: KonaRCTFCredentials | None = None
     ctfd: KonaCTFDCredentials | None = None
+    bksectraining: KonaBKSECTrainingCredentials | None = None
     templates: KonaTemplatesConfig = KonaTemplatesConfig()
     registries: dict[str, str] = {}
     clusters: dict[str, KonaKubernetesClusterConfig] = {}
