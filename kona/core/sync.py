@@ -9,6 +9,7 @@ from kona.core.k8s_manifest_discovery import discover_deployed_endpoints
 from kona.core.kubernetes import load_kubeconfig
 from kona.core.provide import resolve_attachments, resolve_source_paths
 from kona.external.abc import ExternalProviderABC
+from kona.external.bksectraining import BKSECTrainingProvider
 from kona.external.ctfd import CTFDProvider
 from kona.external.rctf import RCTFProvider
 from kona.schema.models import KonaChallengeConfig, KonaGlobalConfig, kona_global_state
@@ -164,12 +165,16 @@ async def try_discover_challenges(
                 await sync_challenge(result, config, path, challenge_schema, external_providers)
 
     # Look for challenges in nested folders
+    excluded = {(kona_global_state.root_path / p).resolve() for p in config.discovery.exclude}
     for item in path.iterdir():
         try:
             if not item.is_dir():
                 continue
         except OSError as err:
             logger.warning(f'Skipping folder {item} due to {err}')
+            continue
+        if item.resolve() in excluded:
+            logger.info(f'Excluded {item} (discovery.exclude)')
             continue
         await try_discover_challenges(
             result,
@@ -191,6 +196,10 @@ async def setup_external_providers(config: KonaGlobalConfig) -> list[ExternalPro
     # CTFd
     if config.ctfd is not None:
         external_providers.append(CTFDProvider(global_config=config, credentials=config.ctfd))
+
+    # BKSEC Training
+    if config.bksectraining is not None:
+        external_providers.append(BKSECTrainingProvider(global_config=config, credentials=config.bksectraining))
 
     for provider in external_providers:
         await provider.setup()
@@ -232,6 +241,8 @@ async def sync(
 
         if challenge_paths is not None:
             await sync_challenge_paths(result, root_path, config, challenge_paths, external_providers)
+            for provider in external_providers:
+                await provider.finalize()
             return result
 
         # Resolve challenge filter
@@ -249,6 +260,9 @@ async def sync(
             is_root=True,
             challenge_filter=challenge_filter,
         )
+
+        for provider in external_providers:
+            await provider.finalize()
 
         # report untracked challenges only if we're syncing all challenges at once
         if challenge_filter is None:

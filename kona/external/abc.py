@@ -22,6 +22,10 @@ class ExternalProviderABC(ABC):
     ) -> None:
         pass
 
+    async def finalize(self) -> None:
+        """Run once after every challenge in this sync has been synced."""
+        return
+
     def report_untracked_challenges(self) -> None:
         untracked = [chal for chal in self.challenges_on_remote if chal['id'] not in self.synced_remote_ids]
         if not untracked:
