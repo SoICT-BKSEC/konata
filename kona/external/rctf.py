@@ -22,6 +22,9 @@ def _attr_is_synced(attr: str, remote_value: object, local_value: object) -> boo
         remote_code = remote_value.get('code') if isinstance(remote_value, dict) else None
         local_code = local_value.get('code') if isinstance(local_value, dict) else None
         return remote_code == local_code
+    if attr == 'prerequisites':
+        # rCTF omits the key when a challenge has no prerequisites.
+        return (remote_value or []) == (local_value or [])
     if attr == 'scoring':
         return (remote_value or _DECAY_SCORING) == (local_value or _DECAY_SCORING)
     return remote_value == local_value
@@ -37,6 +40,10 @@ class RCTFProvider(ExternalProviderABC):
         self.bearer_token: str | None = None
         self.challenges_on_remote: list[dict] = []
         self.synced_remote_ids = set()
+        # Konata challenge id -> rCTF id, used to resolve prerequisites.
+        self._remote_ids: dict[str, str] = {}
+        # rCTF id -> (Konata id, declared prerequisites, hidden) to finish in finalize().
+        self._pending_prerequisites: dict[str, tuple[str, list[str], bool]] = {}
 
     @property
     def _client(self) -> AsyncClient:
@@ -74,6 +81,8 @@ class RCTFProvider(ExternalProviderABC):
             r = await client.get('/api/v2/admin/challs')
             raise_for_status(r)
             self.challenges_on_remote = r.json()['data']
+        for chal in self.challenges_on_remote:
+            self._remote_ids.setdefault(chal['id'], chal['id'])
         logger.info(f'Retrieved {len(self.challenges_on_remote)} rCTF challenges from remote')
 
     async def _upload_file(self, file: Path) -> dict[str, Any]:
@@ -135,11 +144,77 @@ class RCTFProvider(ExternalProviderABC):
             return legacy_id
         return challenge_id
 
+    @staticmethod
+    def _declared_prerequisites(challenge: KonaChallengeItem) -> list[str]:
+        declared = challenge.prerequisites
+        if challenge.challenge_id in declared:
+            msg = f'Challenge {challenge.challenge_id}: a challenge cannot be its own prerequisite.'
+            raise ValueError(msg)
+        duplicates = sorted({p for p in declared if declared.count(p) > 1})
+        if duplicates:
+            msg = f'Challenge {challenge.challenge_id}: duplicate prerequisites {", ".join(duplicates)}.'
+            raise ValueError(msg)
+        return declared
+
+    def _first_pass_prerequisites(
+        self, challenge: KonaChallengeItem, challenge_id: str, declared: list[str]
+    ) -> tuple[list[str], bool, bool]:
+        """Return (prerequisites, hidden, deferred) to send now.
+
+        rCTF rejects unknown prerequisite ids, so a prerequisite synced later in
+        this run is resolved in ``finalize()``. Until then an existing challenge
+        keeps the gate rCTF already has, and a new one is created hidden so it
+        never appears ungated.
+        """
+        resolved = [self._remote_ids.get(p) for p in declared]
+        if all(r is not None for r in resolved):
+            return [r for r in resolved if r is not None], challenge.hidden, False
+        existing = next((chal for chal in self.challenges_on_remote if chal['id'] == challenge_id), None)
+        if existing is not None:
+            return list(existing.get('prerequisites') or []), challenge.hidden, True
+        return [r for r in resolved if r is not None], True, True
+
+    async def finalize(self) -> None:
+        """Apply prerequisites that named a challenge synced later in this run."""
+        unresolved: dict[str, list[str]] = {}
+        async with self._client as client:
+            for remote_id, (kona_id, declared, hidden) in self._pending_prerequisites.items():
+                missing = [p for p in declared if p not in self._remote_ids]
+                if missing:
+                    unresolved[kona_id] = missing
+                    continue
+                prerequisites = [self._remote_ids[p] for p in declared]
+                r = await client.put(
+                    f'/api/v2/admin/challs/{quote(remote_id)}',
+                    json={'data': {'prerequisites': prerequisites, 'hidden': hidden}},
+                )
+                raise_for_status(r)
+                logger.info(f'Challenge {kona_id}: prerequisites set to {", ".join(declared)}')
+        self._pending_prerequisites.clear()
+        if unresolved:
+            details = '; '.join(f'{kona_id} -> {", ".join(missing)}' for kona_id, missing in unresolved.items())
+            msg = (
+                f'Unknown prerequisite challenge(s): {details}. Each must be a challenge id '
+                'that is synced in this run or already exists on rCTF.'
+            )
+            raise ValueError(msg)
+
     async def sync_challenge(
         self, challenge: KonaChallengeItem, attachment_paths: list[Path], rendered_description: str
     ) -> None:
         challenge_id = self._resolve_challenge_id(challenge)
         self.synced_remote_ids.add(challenge_id)
+        declared_prerequisites = self._declared_prerequisites(challenge)
+        prerequisites, hidden, deferred = self._first_pass_prerequisites(
+            challenge, challenge_id, declared_prerequisites
+        )
+        self._remote_ids[challenge.challenge_id] = challenge_id
+        if deferred:
+            self._pending_prerequisites[challenge_id] = (
+                challenge.challenge_id,
+                declared_prerequisites,
+                challenge.hidden,
+            )
         uploaded_files: list[dict[str, Any]] = [
             await self._upload_file(attachment_path) for attachment_path in attachment_paths
         ]
@@ -156,7 +231,8 @@ class RCTFProvider(ExternalProviderABC):
             'description': rendered_description,
             'tags': challenge.tags,
             'tiebreakEligible': challenge.scoring.rctf.eligible_for_tiebreaks,
-            'hidden': challenge.hidden,
+            'hidden': hidden,
+            'prerequisites': prerequisites,
             'sortWeight': challenge.sort_weight or 0,
             'releaseTime': challenge.release_time_ms,
             'scoring': self._scoring_payload(challenge),

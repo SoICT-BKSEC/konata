@@ -326,8 +326,8 @@ class KonaChallengeItem(KonaModel):
     ctfd: CTFD = CTFD()
     instancer_config: InstancerConfig | None = None
     admin_bot: AdminBotConfig | None = None
-    # Challenge ids of challenges that must be solved first. Only the BKSEC
-    # Training provider reads it; the others ignore it.
+    # Challenge ids of challenges that must be solved first. The rCTF and BKSEC
+    # Training providers read it; CTFd ignores it.
     prerequisites: list[str] = []
 
     _generated_id: str | None = PrivateAttr(default=None)

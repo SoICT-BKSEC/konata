@@ -9,6 +9,8 @@
 > - `kona/schema/models.py` — `KonaBKSECTrainingCredentials`, the `bksectraining`
 >   description template, and the `[bksectraining]` config section.
 > - `kona/core/sync.py` — registers the provider.
+> - `kona/external/rctf.py` — syncs `prerequisites` to rCTF (needs the
+>   SoICT-BKSEC rCTF build with prerequisite support).
 > - `discovery.exclude` — folders discovery never enters, e.g. `exclude = ["archive"]`.
 > - Removed upstream's PyPI release workflow and CODEOWNERS (they belong to upstream).
 >
